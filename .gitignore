@@ -25,6 +25,8 @@ venv/
 env/
 ENV/
 .env
+.venv/
+.venv-*/
 
 # IDE
 .idea/
@@ -39,6 +41,7 @@ ENV/
 *.sqlite3
 *.log
 migration_report.md
+data/
 
 # Test coverage
 .coverage
