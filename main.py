@@ -1,21 +1,15 @@
-from src.migrator import DatabaseMigrator
-from config.schema_config import SCHEMA_CONFIG
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from helpers import migrate
+import sys
+import argparse
 
 def main():
-    try:
-        # Initialize migrator
-        migrator = DatabaseMigrator(SCHEMA_CONFIG)
-        
-        # Run migration
-        migrator.migrate_all()
-        
-    except Exception as e:
-        logger.error(f"Migration failed: {str(e)}")
-        raise
+    # Parse arguments
+    parser = argparse.ArgumentParser(description="Run database migration")
+    parser.add_argument("--table", type=str, help="Migrate a specific table")
+    args = parser.parse_args()
+    
+    # Run migration with optional table parameter
+    migrate(table_name=args.table)
 
 if __name__ == "__main__":
-    main() 
+    main()

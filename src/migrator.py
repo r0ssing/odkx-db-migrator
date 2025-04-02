@@ -1,7 +1,8 @@
 from sqlite3 import connect
-from typing import List, Dict, Any, Set, Tuple, Callable, Type
+from typing import List, Dict, Any, Set, Tuple, Callable, Type, Optional
 from datetime import datetime, date
 import logging
+import json
 from config.schema_config import DatabaseConfig, coerce_to_int, coerce_to_float, coerce_to_bool
 
 logging.basicConfig(level=logging.INFO)
@@ -21,6 +22,7 @@ class DatabaseMigrator:
             "source_only_columns": {},
             "target_only_columns": {},
             "type_conversion_issues": {},
+            "pseudotype_conversions": {},
             "test_mode": config.test_mode,
             "max_rows_per_table": config.max_rows_per_table
         }
@@ -56,9 +58,101 @@ class DatabaseMigrator:
                 }
         return None
     
+    def get_column_pseudotype(self, db, table_name: str) -> Dict[str, str]:
+        """
+        Get the pseudotype information for columns in a table from _column_definitions.
+        
+        Returns:
+            Dict[str, str]: Dictionary mapping column names to their pseudotypes
+        """
+        cursor = db.cursor()
+        try:
+            # Query the _column_definitions table to get pseudotypes
+            query = """
+                SELECT _element_key, _element_type 
+                FROM _column_definitions 
+                WHERE _table_id = ?
+            """
+            cursor.execute(query, (table_name,))
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        except Exception as e:
+            logger.warning(f"Error getting pseudotypes for table {table_name}: {str(e)}")
+            return {}
+    
+    def convert_value_by_pseudotype(self, value: Any, source_type: str, target_type: str, column_name: str) -> Any:
+        """
+        Convert a value based on source and target pseudotypes.
+        
+        Args:
+            value: The value to convert
+            source_type: The pseudotype in the source database
+            target_type: The pseudotype in the target database
+            column_name: The name of the column (for logging)
+            
+        Returns:
+            The converted value
+        """
+        if value is None:
+            return None
+            
+        # Handle string to array conversion
+        if source_type == "string" and target_type == "array":
+            try:
+                # Check if the value is already a JSON string
+                if value.startswith('[') and value.endswith(']'):
+                    try:
+                        # Try to parse it as JSON
+                        return value
+                    except:
+                        pass
+                
+                # Wrap the string in a single-element array
+                return json.dumps([value])
+            except Exception as e:
+                logger.warning(f"Error converting string to array for column {column_name}: {str(e)}")
+                return json.dumps([str(value)])
+                
+        # Handle array to string conversion (take first element if it exists)
+        if source_type == "array" and target_type == "string":
+            try:
+                # Try to parse the array
+                if isinstance(value, str) and value.startswith('[') and value.endswith(']'):
+                    array_value = json.loads(value)
+                    if array_value and len(array_value) > 0:
+                        return array_value[0]
+                    return ""
+                return str(value)
+            except Exception as e:
+                logger.warning(f"Error converting array to string for column {column_name}: {str(e)}")
+                return str(value)
+        
+        # Log warning for unsupported pseudotype conversions
+        if source_type != target_type:
+            logger.warning(f"Unsupported pseudotype conversion for column {column_name}: {source_type} -> {target_type}")
+            # Add to migration stats for reporting
+            if "unsupported_conversions" not in self.migration_stats:
+                self.migration_stats["unsupported_conversions"] = {}
+            
+            table_name = getattr(self, "_current_table", "unknown_table")
+            if table_name not in self.migration_stats["unsupported_conversions"]:
+                self.migration_stats["unsupported_conversions"][table_name] = {}
+            
+            if column_name not in self.migration_stats["unsupported_conversions"][table_name]:
+                self.migration_stats["unsupported_conversions"][table_name][column_name] = {
+                    "source_type": source_type,
+                    "target_type": target_type,
+                    "example_value": str(value)[:100]  # Truncate long values
+                }
+                
+        # Default: return the original value
+        return value
+    
     def migrate_table(self, table_name: str):
         """Migrate a single table, handling column matching and transformations."""
         logger.info(f"\nProcessing table: {table_name}")
+        
+        # Store current table name for reference in other methods
+        self._current_table = table_name
         
         # Check if source table has any rows
         cursor = self.source_db.cursor()
@@ -72,6 +166,13 @@ class DatabaseMigrator:
         # Get column names from both databases
         source_columns = self.get_column_names(self.source_db, table_name)
         target_columns = self.get_column_names(self.target_db, table_name)
+        
+        # Get pseudotype information for source and target columns
+        source_pseudotypes = self.get_column_pseudotype(self.source_db, table_name)
+        target_pseudotypes = self.get_column_pseudotype(self.target_db, table_name)
+        
+        # Track pseudotype conversions for this table
+        pseudotype_conversions = {}
         
         # Find matching and non-matching columns
         matching_columns = source_columns.intersection(target_columns)
@@ -119,10 +220,40 @@ class DatabaseMigrator:
                         # Construct and execute the insert statement
                         insert_sql = f"INSERT INTO {table_name} ({', '.join(matching_columns)}) VALUES {placeholders}"
                         
-                        # Flatten the batch for SQLite
+                        # Flatten the batch for SQLite with pseudotype conversions
                         values = []
                         for record in batch:
                             record_dict = dict(zip(column_names, record))
+                            
+                            # Apply pseudotype conversions for each column
+                            for col in matching_columns:
+                                source_type = source_pseudotypes.get(col, "string")  # Default to string if not found
+                                target_type = target_pseudotypes.get(col, "string")  # Default to string if not found
+                                
+                                # Check if pseudotype conversion is needed
+                                if source_type != target_type:
+                                    original_value = record_dict[col]
+                                    converted_value = self.convert_value_by_pseudotype(
+                                        original_value, source_type, target_type, col
+                                    )
+                                    record_dict[col] = converted_value
+                                    
+                                    # Track the conversion for reporting
+                                    if col not in pseudotype_conversions:
+                                        pseudotype_conversions[col] = {
+                                            "source_type": source_type,
+                                            "target_type": target_type,
+                                            "examples": []
+                                        }
+                                    
+                                    # Add an example of the conversion (limit to 3 examples)
+                                    if len(pseudotype_conversions[col]["examples"]) < 3:
+                                        pseudotype_conversions[col]["examples"].append({
+                                            "original": original_value,
+                                            "converted": converted_value
+                                        })
+                            
+                            # Add the values to the batch
                             values.extend(record_dict[col] for col in matching_columns)
                         
                         # Execute the insert
@@ -131,6 +262,15 @@ class DatabaseMigrator:
                         self.target_db.commit()
                         
                         logger.info(f"Inserted batch of {len(batch)} records")
+                    
+                    # Log pseudotype conversions if any occurred
+                    if pseudotype_conversions:
+                        self.migration_stats["pseudotype_conversions"][table_name] = pseudotype_conversions
+                        logger.info(f"Applied pseudotype conversions for table {table_name}:")
+                        for col, info in pseudotype_conversions.items():
+                            logger.info(f"  Column {col}: {info['source_type']} -> {info['target_type']}")
+                            for example in info["examples"]:
+                                logger.info(f"    Example: {example['original']} -> {example['converted']}")
                     
                     self.migration_stats["total_records_migrated"] += len(source_records)
                     logger.info(f"Successfully migrated {len(source_records)} records")
@@ -306,6 +446,23 @@ class DatabaseMigrator:
             logger.info("\nColumns in target but not in source:")
             for table, columns in self.migration_stats["target_only_columns"].items():
                 logger.info(f"  {table}: {', '.join(columns)}")
+        
+        if self.migration_stats["pseudotype_conversions"]:
+            logger.info("\nPseudotype Conversions Applied:")
+            for table, columns in self.migration_stats["pseudotype_conversions"].items():
+                logger.info(f"\n  Table: {table}")
+                for column, info in columns.items():
+                    logger.info(f"    Column: {column} ({info['source_type']} -> {info['target_type']})")
+                    for example in info["examples"]:
+                        logger.info(f"      Example: {example['original']} -> {example['converted']}")
+        
+        if self.migration_stats.get("unsupported_conversions"):
+            logger.info("\nUnsupported Pseudotype Conversions (No Conversion Applied):")
+            for table, columns in self.migration_stats["unsupported_conversions"].items():
+                logger.info(f"\n  Table: {table}")
+                for column, info in columns.items():
+                    logger.info(f"    Column: {column} ({info['source_type']} -> {info['target_type']})")
+                    logger.info(f"      Example value: {info['example_value']}")
         
         if self.migration_stats["type_conversion_issues"]:
             logger.info("\nType Conversion Issues:")
