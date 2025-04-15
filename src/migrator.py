@@ -111,6 +111,15 @@ class DatabaseMigrator:
             except Exception as e:
                 logger.warning(f"Error converting string to array for column {column_name}: {str(e)}")
                 return json.dumps([str(value)])
+        
+        # Handle integer to array conversion
+        if source_type == "integer" and target_type == "array":
+            try:
+                # Convert the integer to a string and wrap in an array
+                return json.dumps([str(value)])
+            except Exception as e:
+                logger.warning(f"Error converting integer to array for column {column_name}: {str(e)}")
+                return json.dumps(["0"])  # Default to ["0"] if conversion fails
                 
         # Handle array to string conversion (take first element if it exists)
         if source_type == "array" and target_type == "string":

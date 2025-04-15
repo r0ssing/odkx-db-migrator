@@ -44,8 +44,10 @@ def pull_database(target_file=None):
 def push_database():
     """Push the local database to the connected Android device.
     
-    Pushes the database file from the local path:
-    data/target.db
+    This function:
+    1. Calls clean_device_db() to close ODK-X apps and remove existing database files
+    2. Pushes the database file from the local path:
+       data/target.db
     
     To the device at:
     /sdcard/opendatakit/default/data/webDb/sqlite.db
@@ -58,7 +60,12 @@ def push_database():
         sys.exit(1)
     
     try:
+        # First, clean up the device database
+        print("Cleaning up device database before pushing...")
+        clean_device_db()
+        
         # Push the database file to device
+        print("Pushing database to device...")
         subprocess.run(['adb', 'push', source_path, device_path], check=True)
         print(f"Successfully pushed database to device at {device_path}")
     except subprocess.CalledProcessError as e:
