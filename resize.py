@@ -8,9 +8,15 @@ from collections import defaultdict
 
 # Try to import PIL, but don't fail if it's not available
 PIL_AVAILABLE = False
+PIEXIF_AVAILABLE = False
 try:
-    from PIL import Image
+    from PIL import Image, ExifTags
     PIL_AVAILABLE = True
+    try:
+        import piexif
+        PIEXIF_AVAILABLE = True
+    except ImportError:
+        pass
 except ImportError:
     pass
 
@@ -226,21 +232,13 @@ def resize_images(max_dimension: int = 1024, quality: int = 85, backup: bool = T
                                 if exif_data and orientation in exif_data:
                                     orientation_value = exif_data[orientation]
                                     
-                                    # Apply rotation based on EXIF orientation
-                                    if orientation_value == 2:
-                                        img = img.transpose(Image.FLIP_LEFT_RIGHT)
-                                    elif orientation_value == 3:
-                                        img = img.transpose(Image.ROTATE_180)
-                                    elif orientation_value == 4:
-                                        img = img.transpose(Image.FLIP_TOP_BOTTOM)
-                                    elif orientation_value == 5:
-                                        img = img.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.ROTATE_90)
-                                    elif orientation_value == 6:
-                                        img = img.transpose(Image.ROTATE_270)
-                                    elif orientation_value == 7:
-                                        img = img.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.ROTATE_270)
-                                    elif orientation_value == 8:
-                                        img = img.transpose(Image.ROTATE_90)
+                                    # IMPORTANT: Instead of physically rotating the image based on EXIF orientation,
+                                    # we'll preserve the EXIF orientation data and let the viewing application
+                                    # handle the rotation. This ensures correct display in all applications.
+                                    print(f"  Info: Preserving EXIF orientation {orientation_value} for {file}")
+                                    
+                                    # Set a flag to indicate we're preserving EXIF orientation
+                                    preserve_exif_orientation = True
                         except Exception as e:
                             print(f"  Warning: Could not process EXIF orientation for {file}: {e}")
                         
@@ -257,10 +255,29 @@ def resize_images(max_dimension: int = 1024, quality: int = 85, backup: bool = T
                             # Resize the image
                             resized_img = img.resize((new_width, new_height), Image.LANCZOS)
                             
-                            # Save with specified quality and preserve EXIF data for JPEGs
-                            if ext.lower() in ['.jpg', '.jpeg'] and exif:
-                                resized_img.save(file_path, quality=quality, optimize=True, exif=exif)
+                            # Handle saving with proper orientation
+                            if ext.lower() in ['.jpg', '.jpeg']:
+                                # For JPEG images, preserve the original EXIF data including orientation
+                                try:
+                                    # If we have EXIF data, preserve it
+                                    if exif:
+                                        # Simply save with the original EXIF data
+                                        resized_img.save(file_path, quality=quality, optimize=True, exif=exif)
+                                        print(f"  Info: Saved with original EXIF data for {file}")
+                                    else:
+                                        # No EXIF data, just save normally
+                                        resized_img.save(file_path, quality=quality, optimize=True)
+                                        print(f"  Info: Saved without EXIF data (none found) for {file}")
+                                except Exception as e:
+                                    print(f"  Warning: Error saving image with EXIF: {e}")
+                                    # Fallback: try saving without EXIF
+                                    try:
+                                        resized_img.save(file_path, quality=quality, optimize=True)
+                                        print(f"  Info: Saved without EXIF data (fallback) for {file}")
+                                    except Exception as e2:
+                                        print(f"  Error: Could not save image {file}: {e2}")
                             else:
+                                # Not a JPEG, just save normally
                                 resized_img.save(file_path, quality=quality, optimize=True)
                             
                             # Update statistics
