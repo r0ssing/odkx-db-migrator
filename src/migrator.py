@@ -6,7 +6,7 @@ import json  # Add json import for array/string conversions
 from src.utils import progress_bar_iter
 from tqdm import tqdm
 
-from config.schema_config import DatabaseConfig, coerce_to_int, coerce_to_float, coerce_to_bool
+from src.models import DatabaseConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,9 +27,7 @@ class DatabaseMigrator:
             "source_only_columns": {},
             "target_only_columns": {},
             "type_conversion_issues": {},
-            "pseudotype_conversions": {},
-            "test_mode": config.test_mode,
-            "max_rows_per_table": config.max_rows_per_table
+            "pseudotype_conversions": {}
         }
         self.table_counts = {
             "before": {},
