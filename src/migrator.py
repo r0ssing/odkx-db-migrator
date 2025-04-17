@@ -2,7 +2,10 @@ from sqlite3 import connect
 from typing import List, Dict, Any, Set, Tuple, Callable, Type, Optional
 from datetime import datetime, date
 import logging
-import json
+import json  # Add json import for array/string conversions
+from src.utils import progress_bar_iter
+from tqdm import tqdm
+
 from config.schema_config import DatabaseConfig, coerce_to_int, coerce_to_float, coerce_to_bool
 
 logging.basicConfig(level=logging.INFO)
@@ -13,6 +16,8 @@ class DatabaseMigrator:
         self.config = config
         self.source_db = connect(config.source_db_path)
         self.target_db = connect(config.target_db_path)
+        # Flag to control verbose output
+        self.verbose_mode = True
         self.migration_stats = {
             "tables_migrated": 0,
             "tables_skipped": 0,
@@ -158,7 +163,12 @@ class DatabaseMigrator:
     
     def migrate_table(self, table_name: str):
         """Migrate a single table, handling column matching and transformations."""
-        logger.info(f"\nProcessing table: {table_name}")
+        # Get the root logger to control all logging
+        root_logger = logging.getLogger()
+        src_logger = logging.getLogger("src.migrator")
+        
+        if root_logger.level <= logging.INFO:
+            src_logger.info(f"\nProcessing table: {table_name}")
         
         # Store current table name for reference in other methods
         self._current_table = table_name
@@ -168,7 +178,8 @@ class DatabaseMigrator:
         cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
         source_count = cursor.fetchone()[0]
         if source_count == 0:
-            logger.info(f"Skipping table {table_name} - no records in source")
+            if root_logger.level <= logging.INFO:
+                src_logger.info(f"Skipping table {table_name} - no records in source")
             self.migration_stats["tables_skipped"] += 1
             return
         
@@ -189,10 +200,10 @@ class DatabaseMigrator:
         target_only = target_columns - source_columns
         
         # Log column differences
-        if source_only:
+        if source_only and logger.level <= logging.INFO:
             logger.info(f"Columns in source but not in target: {', '.join(source_only)}")
             self.migration_stats["source_only_columns"][table_name] = source_only
-        if target_only:
+        if target_only and logger.level <= logging.INFO:
             logger.info(f"Columns in target but not in source: {', '.join(target_only)}")
             self.migration_stats["target_only_columns"][table_name] = target_only
         
@@ -221,56 +232,47 @@ class DatabaseMigrator:
                     
                     # Insert records in batches of 100 to avoid SQLite variable limit
                     batch_size = 100  # Reduced from 500 to stay under SQLite's variable limit
+                    num_batches = (len(source_records) + batch_size - 1) // batch_size
+                    
+                    total_inserted = 0
+                    total_errors = 0
+                    
+                    # Process each batch without individual progress bars
                     for i in range(0, len(source_records), batch_size):
                         batch = source_records[i:i + batch_size]
-                        # Create placeholders for the batch
                         placeholders = ", ".join(["(" + ", ".join(["?" for _ in matching_columns]) + ")" for _ in batch])
-                        
-                        # Construct and execute the insert statement
                         insert_sql = f"INSERT INTO {table_name} ({', '.join(matching_columns)}) VALUES {placeholders}"
-                        
-                        # Flatten the batch for SQLite with pseudotype conversions
                         values = []
                         for record in batch:
                             record_dict = dict(zip(column_names, record))
-                            
-                            # Apply pseudotype conversions for each column
                             for col in matching_columns:
-                                source_type = source_pseudotypes.get(col, "string")  # Default to string if not found
-                                target_type = target_pseudotypes.get(col, "string")  # Default to string if not found
-                                
-                                # Check if pseudotype conversion is needed
+                                source_type = source_pseudotypes.get(col, "string")
+                                target_type = target_pseudotypes.get(col, "string")
                                 if source_type != target_type:
                                     original_value = record_dict[col]
                                     converted_value = self.convert_value_by_pseudotype(
                                         original_value, source_type, target_type, col
                                     )
                                     record_dict[col] = converted_value
-                                    
-                                    # Track the conversion for reporting
-                                    if col not in pseudotype_conversions:
-                                        pseudotype_conversions[col] = {
-                                            "source_type": source_type,
-                                            "target_type": target_type,
-                                            "examples": []
-                                        }
-                                    
-                                    # Add an example of the conversion (limit to 3 examples)
-                                    if len(pseudotype_conversions[col]["examples"]) < 3:
-                                        pseudotype_conversions[col]["examples"].append({
-                                            "original": original_value,
-                                            "converted": converted_value
-                                        })
+                            values.extend([record_dict[col] for col in matching_columns])
+                        try:
+                            # Use connection's execute method for proper transaction handling
+                            target_cursor = self.target_db.cursor()
+                            target_cursor.execute("BEGIN TRANSACTION")
+                            target_cursor.execute(insert_sql, values)
+                            self.target_db.commit()
+                            total_inserted += len(batch)
+                            # Log batch progress in a simple format without progress bar
+                            logger.debug(f"Batch {i//batch_size + 1}/{num_batches}: Inserted {len(batch)} records")
+                        except Exception as e:
+                            # Properly handle rollback
+                            try:
+                                self.target_db.rollback()
+                            except Exception as rollback_error:
+                                logger.error(f"Rollback error: {str(rollback_error)}")
                             
-                            # Add the values to the batch
-                            values.extend(record_dict[col] for col in matching_columns)
-                        
-                        # Execute the insert
-                        target_cursor = self.target_db.cursor()
-                        target_cursor.execute(insert_sql, values)
-                        self.target_db.commit()
-                        
-                        logger.info(f"Inserted batch of {len(batch)} records")
+                            total_errors += len(batch)
+                            logger.error(f"Error inserting batch {i//batch_size + 1}/{num_batches}: {str(e)}")
                     
                     # Log pseudotype conversions if any occurred
                     if pseudotype_conversions:
@@ -281,17 +283,10 @@ class DatabaseMigrator:
                             for example in info["examples"]:
                                 logger.info(f"    Example: {example['original']} -> {example['converted']}")
                     
-                    self.migration_stats["total_records_migrated"] += len(source_records)
-                    logger.info(f"Successfully migrated {len(source_records)} records")
-                    
-                    # Verify the insert
-                    target_cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-                    actual_count = target_cursor.fetchone()[0]
-                    logger.info(f"Verified target table count: {actual_count}")
-                    
+                    self.migration_stats["total_records_migrated"] += total_inserted
+                    logger.info(f"Successfully migrated {total_inserted} records with {total_errors} errors")
                 except Exception as e:
-                    self.target_db.rollback()
-                    logger.error(f"Error during insert for table {table_name}: {str(e)}")
+                    logger.error(f"Error during migration for table {table_name}: {str(e)}")
                     raise
             else:
                 logger.warning(f"No records to migrate for table {table_name}")
@@ -308,6 +303,10 @@ class DatabaseMigrator:
     
     def _print_table_counts(self, stage: str):
         """Print a table showing row counts for each table in source and target databases."""
+        # Skip table counts display in non-verbose mode if it's not the initial display
+        if stage == "After Migration" and hasattr(self, 'verbose_mode') and not self.verbose_mode:
+            return
+            
         logger.info(f"\n=== Table Row Counts ({stage}) ===")
         
         # Get all unique table names
@@ -356,6 +355,7 @@ class DatabaseMigrator:
         
         # Add prompt after displaying counts
         if stage == "Before Migration":
+            # Always prompt for confirmation, regardless of verbose mode
             try:
                 input("\nPress [Enter] to continue or [CTRL]+C to abort...")
             except KeyboardInterrupt:
@@ -386,7 +386,6 @@ class DatabaseMigrator:
             rows_updated = cursor.fetchone()[0]
             
             logger.info(f"Updated village values for {rows_updated} records in hh_person table")
-            
         except Exception as e:
             self.target_db.rollback()
             logger.error(f"Error updating village values: {str(e)}")
@@ -415,19 +414,104 @@ class DatabaseMigrator:
             logger.info(f"Tables in target but not in source: {', '.join(target_only)}")
             self.migration_stats["target_only_tables"] = list(target_only)
         
-        # Migrate common tables
-        for table_name in common_tables:
-            self.migrate_table(table_name)
-            self.migration_stats["tables_migrated"] += 1
+        # Create a single progress bar for all tables
+        tables_to_migrate = list(common_tables)
+        total_tables = len(tables_to_migrate)
+        
+        logger.info(f"\nMigrating {total_tables} tables...")
+        
+        # Count total records to migrate for better progress estimation
+        total_records = 0
+        table_record_counts = {}
+        
+        for table_name in tables_to_migrate:
+            cursor = self.source_db.cursor()
+            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+            record_count = cursor.fetchone()[0]
+            table_record_counts[table_name] = record_count
+            total_records += record_count
+        
+        logger.info(f"Total records to migrate: {total_records}")
+        
+        # After displaying info and getting user confirmation, clear the console
+        # to make room for the progress bar
+        print("\n" * 5)
+        
+        # Store original logger level to restore it later
+        original_level = logger.level
+        
+        # Always silence loggers during migration to avoid interference with progress bar
+        # Create a null handler to silence logging
+        class NullHandler(logging.Handler):
+            def emit(self, record):
+                pass
+        
+        # Temporarily silence all loggers during migration
+        root_logger = logging.getLogger()
+        original_root_handlers = root_logger.handlers.copy()
+        original_root_level = root_logger.level
+        root_logger.handlers = []
+        root_logger.addHandler(NullHandler())
+        root_logger.setLevel(logging.ERROR)
+        
+        try:
+            # Create overall progress bar
+            with tqdm(total=total_records, desc="Total migration progress", ncols=100,
+                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as overall_bar:
+                records_migrated = 0
+                
+                # Modify migrate_table method to update the overall progress bar
+                original_migrate_table = self.migrate_table
+                
+                def migrate_table_with_overall_progress(table_name):
+                    nonlocal records_migrated
+                    # Get current record count for this table
+                    record_count = table_record_counts.get(table_name, 0)
+                    
+                    # Update progress bar description
+                    overall_bar.set_description(f"Migrating {table_name} ({records_migrated}/{total_records} records)")
+                    
+                    # Store the original total_records_migrated count
+                    original_count = self.migration_stats["total_records_migrated"]
+                    
+                    # Call the original migrate_table method
+                    original_migrate_table(table_name)
+                    
+                    # Calculate how many records were actually migrated
+                    new_count = self.migration_stats["total_records_migrated"]
+                    records_migrated_for_table = new_count - original_count
+                    
+                    # Update the overall progress bar
+                    overall_bar.update(records_migrated_for_table)
+                    records_migrated += records_migrated_for_table
+                
+                # Temporarily replace the migrate_table method
+                self.migrate_table = migrate_table_with_overall_progress
+                
+                # Migrate common tables
+                for table_name in tables_to_migrate:
+                    self.migrate_table(table_name)
+                    self.migration_stats["tables_migrated"] += 1
+        finally:
+            # Restore the original migrate_table method
+            self.migrate_table = original_migrate_table
+            
+            # Restore original logger levels
+            root_logger.handlers = original_root_handlers
+            root_logger.setLevel(original_root_level)
         
         # Update village values in hh_person table
         self.update_person_villages()
         
-        # Log summary statistics
-        self._log_summary()
-        
-        # Print final table counts
-        self._print_table_counts("After Migration")
+        # Log summary statistics based on verbose mode
+        if hasattr(self, 'verbose_mode') and not self.verbose_mode:
+            # In non-verbose mode, just print a simple summary
+            print(f"\nMigration complete. {self.migration_stats['total_records_migrated']} records migrated across {self.migration_stats['tables_migrated']} tables.")
+        else:
+            # In verbose mode, log detailed summary
+            self._log_summary()
+            # Print final table counts
+            self._print_table_counts("After Migration")
     
     def _log_summary(self):
         """Log migration summary statistics."""

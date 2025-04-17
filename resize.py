@@ -4,7 +4,8 @@ import sys
 from typing import Dict, List, Tuple
 import argparse
 import shutil
-from collections import defaultdict
+from tqdm import tqdm
+from src.utils import progress_bar_iter
 
 # Try to import PIL, but don't fail if it's not available
 PIL_AVAILABLE = False
@@ -185,119 +186,85 @@ def resize_images(max_dimension: int = 1024, quality: int = 85, backup: bool = T
     original_size = 0
     new_size = 0
     
+    # First, collect all image files to process
+    image_files = []
     for table in tables:
         table_dir = os.path.join(attachments_dir, table)
-        print(f"\nProcessing table: {table}")
-        
         # Backup table directory if needed
         if backup:
             backup_table_dir = os.path.join('data', 'attachments_backup', table)
             if not os.path.exists(backup_table_dir):
                 shutil.copytree(table_dir, backup_table_dir)
                 print(f"Backed up {table} to {backup_table_dir}")
-        
-        # Walk through all subdirectories
         for root, _, files in os.walk(table_dir):
             for file in files:
-                file_path = os.path.join(root, file)
-                
-                # Check if it's an image file
                 _, ext = os.path.splitext(file)
-                if ext.lower() not in ['.jpg', '.jpeg', '.png']:
-                    skipped_files += 1
-                    continue
-                
-                total_files += 1
-                file_original_size = get_file_size(file_path)
-                original_size += file_original_size
-                
-                try:
-                    # Open and resize the image
-                    with Image.open(file_path) as img:
-                        # Get EXIF data
-                        exif = None
-                        if 'exif' in img.info:
-                            exif = img.info['exif']
-                        
-                        # Check for orientation in EXIF data and rotate if needed
-                        try:
-                            # Only for JPEG images
-                            if ext.lower() in ['.jpg', '.jpeg'] and exif:
-                                from PIL import ExifTags
-                                for orientation in ExifTags.TAGS.keys():
-                                    if ExifTags.TAGS[orientation] == 'Orientation':
-                                        break
-                                
-                                exif_data = img._getexif()
-                                if exif_data and orientation in exif_data:
-                                    orientation_value = exif_data[orientation]
-                                    
-                                    # IMPORTANT: Instead of physically rotating the image based on EXIF orientation,
-                                    # we'll preserve the EXIF orientation data and let the viewing application
-                                    # handle the rotation. This ensures correct display in all applications.
-                                    print(f"  Info: Preserving EXIF orientation {orientation_value} for {file}")
-                                    
-                                    # Set a flag to indicate we're preserving EXIF orientation
-                                    preserve_exif_orientation = True
-                        except Exception as e:
-                            print(f"  Warning: Could not process EXIF orientation for {file}: {e}")
-                        
-                        # Calculate new dimensions while preserving aspect ratio
-                        width, height = img.size
-                        if width > max_dimension or height > max_dimension:
-                            if width > height:
-                                new_height = int(height * (max_dimension / width))
-                                new_width = max_dimension
-                            else:
-                                new_width = int(width * (max_dimension / height))
-                                new_height = max_dimension
-                            
-                            # Resize the image
-                            resized_img = img.resize((new_width, new_height), Image.LANCZOS)
-                            
-                            # Handle saving with proper orientation
-                            if ext.lower() in ['.jpg', '.jpeg']:
-                                # For JPEG images, preserve the original EXIF data including orientation
-                                try:
-                                    # If we have EXIF data, preserve it
-                                    if exif:
-                                        # Simply save with the original EXIF data
-                                        resized_img.save(file_path, quality=quality, optimize=True, exif=exif)
-                                        print(f"  Info: Saved with original EXIF data for {file}")
-                                    else:
-                                        # No EXIF data, just save normally
-                                        resized_img.save(file_path, quality=quality, optimize=True)
-                                        print(f"  Info: Saved without EXIF data (none found) for {file}")
-                                except Exception as e:
-                                    print(f"  Warning: Error saving image with EXIF: {e}")
-                                    # Fallback: try saving without EXIF
-                                    try:
-                                        resized_img.save(file_path, quality=quality, optimize=True)
-                                        print(f"  Info: Saved without EXIF data (fallback) for {file}")
-                                    except Exception as e2:
-                                        print(f"  Error: Could not save image {file}: {e2}")
-                            else:
-                                # Not a JPEG, just save normally
-                                resized_img.save(file_path, quality=quality, optimize=True)
-                            
-                            # Update statistics
-                            file_new_size = get_file_size(file_path)
-                            new_size += file_new_size
-                            
-                            reduction = (1 - (file_new_size / file_original_size)) * 100
-                            print(f"  Resized {file}: {format_size(file_original_size)} → {format_size(file_new_size)} ({reduction:.1f}% reduction)")
-                            
-                            processed_files += 1
-                        else:
-                            # Image is already smaller than max dimension
-                            new_size += file_original_size
-                            skipped_files += 1
-                
-                except Exception as e:
-                    print(f"  Error processing {file}: {e}")
-                    error_files += 1
-                    new_size += file_original_size  # Add original size since file wasn't changed
+                if ext.lower() in ['.jpg', '.jpeg', '.png']:
+                    image_files.append((root, file, table))
+    total_files = len(image_files)
+    if total_files == 0:
+        print("No image files found to process.")
+        return
     
+    with tqdm(image_files, total=total_files, desc="Resizing images", ncols=100,
+             bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as bar:
+        for root, file, table in bar:
+            file_path = os.path.join(root, file)
+            file_original_size = get_file_size(file_path)
+            original_size += file_original_size
+            postfix = {"file": f"{table}/{file}"}
+            try:
+                with Image.open(file_path) as img:
+                    exif = img.info.get('exif') if 'exif' in img.info else None
+                    try:
+                        _, ext = os.path.splitext(file)
+                        if ext.lower() in ['.jpg', '.jpeg'] and exif:
+                            from PIL import ExifTags
+                            for orientation in ExifTags.TAGS.keys():
+                                if ExifTags.TAGS[orientation] == 'Orientation':
+                                    break
+                            exif_data = img._getexif()
+                            if exif_data and orientation in exif_data:
+                                orientation_value = exif_data[orientation]
+                                postfix["exif"] = f"EXIF {orientation_value}"
+                    except Exception as e:
+                        postfix["warn"] = f"EXIF warn"
+                    width, height = img.size
+                    if width > max_dimension or height > max_dimension:
+                        if width > height:
+                            new_height = int(height * (max_dimension / width))
+                            new_width = max_dimension
+                        else:
+                            new_width = int(width * (max_dimension / height))
+                            new_height = max_dimension
+                        resized_img = img.resize((new_width, new_height), Image.LANCZOS)
+                        if ext.lower() in ['.jpg', '.jpeg']:
+                            try:
+                                if exif:
+                                    resized_img.save(file_path, quality=quality, optimize=True, exif=exif)
+                                else:
+                                    resized_img.save(file_path, quality=quality, optimize=True)
+                            except Exception as e:
+                                postfix["warn"] = "Save warn"
+                                try:
+                                    resized_img.save(file_path, quality=quality, optimize=True)
+                                except Exception as e2:
+                                    postfix["error"] = "Save fail"
+                        else:
+                            resized_img.save(file_path, quality=quality, optimize=True)
+                        file_new_size = get_file_size(file_path)
+                        new_size += file_new_size
+                        reduction = (1 - (file_new_size / file_original_size)) * 100
+                        postfix["reduction"] = f"{reduction:.1f}%"
+                        processed_files += 1
+                    else:
+                        new_size += file_original_size
+                        skipped_files += 1
+            except Exception as e:
+                postfix["error"] = "Proc fail"
+                error_files += 1
+                new_size += file_original_size
+            bar.set_postfix(postfix, refresh=True)
     # Print summary
     print("\n" + "="*60)
     print("Resize Summary:")
@@ -305,13 +272,11 @@ def resize_images(max_dimension: int = 1024, quality: int = 85, backup: bool = T
     print(f"Files resized: {processed_files}")
     print(f"Files skipped (non-image or already small): {skipped_files}")
     print(f"Files with errors: {error_files}")
-    
     if original_size > 0:
         reduction = (1 - (new_size / original_size)) * 100
         print(f"Original size: {format_size(original_size)}")
         print(f"New size: {format_size(new_size)}")
         print(f"Reduction: {reduction:.1f}%")
-    
     print("="*60)
 
 def help():
@@ -336,7 +301,7 @@ def help():
     print("==================================================")
     print("  python resize.py <command> [options]")
     
-    if pil_available:
+    if PIL_AVAILABLE:
         print("\nOptions for resize_images:")
         print(f"  {'--max-dimension':<20} - Maximum width or height in pixels (default: 1024)")
         print(f"  {'--quality':<20} - JPEG quality (0-100, higher is better quality but larger file) (default: 85)")

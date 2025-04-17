@@ -952,7 +952,7 @@ def help():
     print("  execute_sql_target         - Execute SQL query against the target database")
     print("                               Options: --sql=<sql_query>")
     print("  migrate                    - Run the database migration process")
-    print("                               Options: --table=<table_name>")
+    print("                               Options: --table=<table_name> --verbose")
     print("  describe_table_changes     - Describe changes to a table based on column definitions comparison")
     print("                               Options: --table=<table_name>")
 
@@ -1066,7 +1066,7 @@ def execute_sql_target(sql: str, verbose: bool = True):
     finally:
         conn.close()
 
-def migrate(table_name=None):
+def migrate(table_name=None, verbose=False):
     """
     Run the database migration process.
     
@@ -1076,6 +1076,7 @@ def migrate(table_name=None):
     Args:
         table_name: Optional. If provided, only migrate this specific table.
                    If None, migrate all tables.
+        verbose: If True, show detailed log messages during migration.
     
     Raises:
         Exception: If the migration process fails
@@ -1083,29 +1084,185 @@ def migrate(table_name=None):
     from src.migrator import DatabaseMigrator
     from config.schema_config import SCHEMA_CONFIG
     import logging
+    from tqdm import tqdm
+    import sys
+    import os
 
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
+    # Configure root logger
+    root_logger = logging.getLogger()
+    
+    # Store original handlers and level
+    original_handlers = root_logger.handlers.copy()
+    original_level = root_logger.level
+    
+    # Set up logging based on verbose flag
+    if verbose:
+        # Configure for verbose output
+        root_logger.setLevel(logging.INFO)
+        # Ensure we have a console handler
+        if not any(isinstance(h, logging.StreamHandler) for h in root_logger.handlers):
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setFormatter(logging.Formatter('%(levelname)s:%(name)s: %(message)s'))
+            root_logger.addHandler(console_handler)
+    else:
+        # For non-verbose mode, only show ERROR messages
+        root_logger.setLevel(logging.ERROR)
     
     try:
         # Initialize migrator
         migrator = DatabaseMigrator(SCHEMA_CONFIG)
         
+        # Set the verbose mode on the migrator
+        migrator.verbose_mode = verbose
+        
         # Run migration
         if table_name:
-            logger.info(f"Migrating table: {table_name}")
-            migrator.migrate_table(table_name)
+            # For single table migration
+            if verbose:
+                logging.info(f"Migrating table: {table_name}")
+            
+            # Get record count for the table
+            cursor = migrator.source_db.cursor()
+            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+            total_records = cursor.fetchone()[0]
+            
+            if total_records > 0:
+                # Create a progress bar
+                with tqdm(total=total_records, desc=f"Migrating {table_name}", ncols=100,
+                          bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
+                    # Store original stats
+                    original_count = migrator.migration_stats["total_records_migrated"]
+                    
+                    # Temporarily silence all loggers during migration to avoid interference with progress bar
+                    if verbose:
+                        temp_level = root_logger.level
+                        root_logger.setLevel(logging.ERROR)
+                    
+                    # Migrate the table
+                    migrator.migrate_table(table_name)
+                    
+                    # Restore logger level if in verbose mode
+                    if verbose:
+                        root_logger.setLevel(temp_level)
+                    
+                    # Update progress bar
+                    migrated_count = migrator.migration_stats["total_records_migrated"] - original_count
+                    pbar.update(migrated_count)
+            else:
+                # If no records, just migrate normally
+                migrator.migrate_table(table_name)
+                
+            # Show summary for single table migration
+            print(f"\nMigration complete. {migrator.migration_stats['total_records_migrated']} records migrated.")
         else:
-            logger.info("Migrating all tables")
-            migrator.migrate_all()
-        
+            # For migrate_all, temporarily enable INFO level to show table counts
+            if not verbose:
+                root_logger.setLevel(logging.INFO)
+            
+            # For migrate_all, we need to handle the migration ourselves to ensure the progress bar is displayed properly
+            # First, show the table counts and get user confirmation
+            migrator._print_table_counts("Before Migration")
+            
+            # Get table names from both databases
+            source_tables = migrator.get_table_names(migrator.source_db)
+            target_tables = migrator.get_table_names(migrator.target_db)
+            
+            # Find tables that exist in both databases
+            common_tables = source_tables.intersection(target_tables)
+            
+            # Log table differences
+            source_only = source_tables - target_tables
+            target_only = target_tables - source_tables
+            
+            if source_only:
+                logging.info(f"\nTables in source but not in target: {', '.join(source_only)}")
+                migrator.migration_stats["source_only_tables"] = list(source_only)
+            if target_only:
+                logging.info(f"Tables in target but not in source: {', '.join(target_only)}")
+                migrator.migration_stats["target_only_tables"] = list(target_only)
+            
+            # Create a single progress bar for all tables
+            tables_to_migrate = list(common_tables)
+            total_tables = len(tables_to_migrate)
+            
+            logging.info(f"\nMigrating {total_tables} tables...")
+            
+            # Count total records to migrate for better progress estimation
+            total_records = 0
+            table_record_counts = {}
+            
+            for table_name in tables_to_migrate:
+                cursor = migrator.source_db.cursor()
+                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                record_count = cursor.fetchone()[0]
+                table_record_counts[table_name] = record_count
+                total_records += record_count
+            
+            logging.info(f"Total records to migrate: {total_records}")
+            
+            # Get user confirmation
+            try:
+                input("\nPress [Enter] to continue or [CTRL]+C to abort...")
+            except KeyboardInterrupt:
+                logging.info("\nMigration aborted by user.")
+                raise
+            
+            # Clear the console to make room for the progress bar
+            os.system('cls' if os.name == 'nt' else 'clear')
+            
+            # Silence all loggers during migration to avoid interference with progress bar
+            root_logger.setLevel(logging.ERROR)
+            
+            # Create overall progress bar
+            with tqdm(total=total_records, desc="Total migration progress", ncols=100,
+                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as overall_bar:
+                records_migrated = 0
+                
+                # Migrate common tables
+                for table_name in tables_to_migrate:
+                    # Update progress bar description
+                    overall_bar.set_description(f"Migrating {table_name} ({records_migrated}/{total_records} records)")
+                    
+                    # Store the original total_records_migrated count
+                    original_count = migrator.migration_stats["total_records_migrated"]
+                    
+                    # Migrate the table
+                    migrator.migrate_table(table_name)
+                    
+                    # Calculate how many records were actually migrated
+                    new_count = migrator.migration_stats["total_records_migrated"]
+                    records_migrated_for_table = new_count - original_count
+                    
+                    # Update the overall progress bar
+                    overall_bar.update(records_migrated_for_table)
+                    records_migrated += records_migrated_for_table
+                    
+                    # Update migration stats
+                    migrator.migration_stats["tables_migrated"] += 1
+            
+            # Update village values in hh_person table
+            migrator.update_person_villages()
+            
+            # Show summary
+            if verbose:
+                # Restore logger level for verbose output
+                root_logger.setLevel(logging.INFO)
+                migrator._log_summary()
+                migrator._print_table_counts("After Migration")
+            else:
+                # In non-verbose mode, just print a simple summary
+                print(f"\nMigration complete. {migrator.migration_stats['total_records_migrated']} records migrated across {migrator.migration_stats['tables_migrated']} tables.")
     except Exception as e:
-        logger.error(f"Migration failed: {str(e)}")
+        logging.error(f"Migration failed: {str(e)}")
         raise
+    finally:
+        # Always restore original logger configuration
+        root_logger.handlers = original_handlers
+        root_logger.setLevel(original_level)
 
 def main():
     if len(sys.argv) < 2:
-        print("Please specify a command")
+        help()
         return
     
     command = sys.argv[1]
@@ -1187,9 +1344,10 @@ def main():
         # Parse arguments
         parser = argparse.ArgumentParser(description="Run the database migration process")
         parser.add_argument("--table", help="Specific table to migrate")
+        parser.add_argument("--verbose", action="store_true", help="Show detailed log messages during migration")
         args, _ = parser.parse_known_args(sys.argv[2:])
         
-        migrate(args.table)
+        migrate(args.table, verbose=args.verbose)
     elif command == "describe_table_changes":
         # Parse arguments
         parser = argparse.ArgumentParser(description="Describe changes to a table based on column definitions")
