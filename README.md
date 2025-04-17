@@ -114,4 +114,5 @@ Edit `config/schema_config.py` to define:
 - Source and target table schemas
 - Column mappings
 - Custom transformation logic for new columns
-- Pseudotype handling for ODK-X specific data types
+
+Pseudotype conversions (e.g., string to array) are automatically handled based on the _column_definitions table in the ODK-X databases, so no explicit configuration is needed for this feature.
