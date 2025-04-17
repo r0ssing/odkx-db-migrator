@@ -307,6 +307,11 @@ def help():
         print(f"  {'--quality':<20} - JPEG quality (0-100, higher is better quality but larger file) (default: 85)")
         print(f"  {'--no-backup':<20} - Skip creating backup of original images")
         print(f"  {'--table':<20} - Only process images for the specified table")
+    
+    print("\nSee also:")
+    print("  Database and attachment management helper functions:")
+    print("    python helpers.py")
+    print("    (e.g., pull_database, push_database, get_forms_with_attachments, remove_empty_files, etc.)")
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] == 'help':
