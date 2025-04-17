@@ -8,6 +8,32 @@ This tool helps migrate data from one ODK-X SQLite database to another with a di
 - Pseudotype conversions (e.g., string to array)
 - Attachment management and resizing
 
+## Quick Start
+
+1. **View available commands:**
+```bash
+python helpers.py
+```
+
+2. **Set up the source and target databases:**
+```bash
+# Pull the database from the current ODK-X app (version N) and save as source.db
+python helpers.py pull_database --target_file source.db
+
+# Pull the database from the new ODK-X app (version N+1) and save as target.db
+python helpers.py pull_database
+```
+
+3. **Run the migration:**
+```bash
+python helpers.py migrate [--table TABLE_NAME] [--verbose]
+```
+
+4. **Manage attachments:**
+```bash
+python resize.py
+```
+
 ## Project Structure
 ```
 datamigration/
@@ -31,40 +57,37 @@ datamigration/
 
 ### Source Database
 The source database (`data/source.db`) should be a populated database from the current version of the ODK-X app:
-1. Connect your Android device with the current ODK-X app installed
-2. Use the `pull_database` helper function to pull the database from the device:
-   ```bash
-   python helpers.py pull_database
-   ```
-3. Rename the pulled database to `source.db`:
-   ```bash
-   mv data/target.db data/source.db
-   ```
+
+```bash
+# Connect your Android device with the current ODK-X app installed
+python helpers.py pull_database --target_file source.db
+```
 
 ### Target Database
 The target database (`data/target.db`) should be an empty database created by the new version of the ODK-X app:
-1. Install the new version of the ODK-X app on your device
-2. Run the initialization logic (i.e., start Tables/Survey apps)
-3. Use the `pull_database` helper function to pull the initialized database:
-   ```bash
-   python helpers.py pull_database
-   ```
+
+```bash
+# Install the new version of the ODK-X app on your device
+# Run the initialization logic (i.e., start Tables/Survey apps)
+python helpers.py pull_database
+```
 
 ## Setup
-1. Create a virtual environment:
+
+1. **Create a virtual environment:**
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-2. Install dependencies:
+2. **Install dependencies:**
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Configure your schema in `config/schema_config.py`
+3. **Configure your schema** in `config/schema_config.py`
 
-4. Run the migration:
+4. **Run the migration:**
 ```bash
 python helpers.py migrate [--table TABLE_NAME] [--verbose]
 ```
