@@ -47,7 +47,10 @@ datamigration/
 ├── data/
 │   ├── source.db          # Source database (from current ODK-X app (ie version *N*))
 │   ├── target.db          # Target database (from new ODK-X app (ie version *N+1*))
-│   └── attachments/       # Directory for attachment files (to be resized, pruned, pushed to device, etc.)
+│   └── attachments/       # Directory for attachment files (same structure as on device)
+|       └── <table_name>/instances/<instance_id>/<attachment_name>.jpg
+|       └── <table_name>/instances/<instance_id>/<attachment_name>.jpg
+|       └── ...
 ├── helpers.py            # Helper functions for database and attachment management
 ├── resize.py             # Attachment resizing and analysis tools
 └── requirements.txt
