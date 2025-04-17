@@ -79,11 +79,10 @@ SCHEMA_CONFIG = DatabaseConfig(
     source_db_path="data/source.db",
     target_db_path="data/target.db",
     column_transformations={
-        "created_at": lambda x: x.split()[0] if x else None,  # Extract date from datetime
         "name": lambda x: x.title() if x else None,  # Capitalize names
         "village": get_village_from_household,  # Complex transformation using SQL join
     },
     # Testing options
     test_mode=True,  # Enable test mode
     max_rows_per_table=None  # No limit on rows per table
-) 
+)
