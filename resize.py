@@ -4,8 +4,16 @@ import sys
 from typing import Dict, List, Tuple
 import argparse
 import shutil
+from collections import defaultdict, Counter
 from tqdm import tqdm
-from src.utils import progress_bar_iter
+
+# Try to import progress_bar_iter, but don't fail if it's not available
+try:
+    from src.utils import progress_bar_iter
+except ImportError:
+    # Define a simple fallback if the import fails
+    def progress_bar_iter(iterable, **kwargs):
+        return tqdm(iterable, **kwargs)
 
 # Try to import PIL, but don't fail if it's not available
 PIL_AVAILABLE = False
@@ -36,8 +44,13 @@ def format_size(size_bytes: int) -> str:
     else:
         return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
 
-def get_sizes():
-    """Print a summary of the sizes of each folder under data/attachments."""
+def get_sizes(test_all=False):
+    """Print a summary of the sizes of each folder under data/attachments.
+    
+    Args:
+        test_all: If True, check dimensions of all images (slower but more accurate)
+                  If False (default), only check the first 10 images per table
+    """
     attachments_dir = os.path.join('data', 'attachments')
     
     if not os.path.exists(attachments_dir):
@@ -51,17 +64,26 @@ def get_sizes():
         print(f"No attachment directories found in {attachments_dir}")
         return
     
-    print(f"\nAttachment Size Summary:")
-    print(f"{'Table':<20} {'Files':<10} {'Total Size':<15} {'Avg Size':<15}")
-    print("-" * 60)
+    # First pass: collect data and determine column widths
+    table_data = []
+    max_table_name_len = len("Table")
+    max_files_len = len("Files")
+    max_total_size_len = len("Total Size")
+    max_avg_size_len = len("Avg Size")
+    max_dimensions_len = len("Dimensions")
     
     grand_total_size = 0
     grand_total_files = 0
+    all_dimensions = Counter()
     
     for table in tables:
         table_dir = os.path.join(attachments_dir, table)
         table_size = 0
         file_count = 0
+        dimensions_counter = Counter()
+        
+        # Track how many images we've processed for this table (for quick mode)
+        images_processed = 0
         
         # Walk through all subdirectories
         for root, _, files in os.walk(table_dir):
@@ -70,19 +92,110 @@ def get_sizes():
                 file_size = get_file_size(file_path)
                 table_size += file_size
                 file_count += 1
+                
+                # Get image dimensions if it's an image file
+                _, ext = os.path.splitext(file)
+                if PIL_AVAILABLE and ext.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff']:
+                    # By default, only process the first 10 images per table
+                    # If test_all is True, process all images
+                    if not test_all and images_processed >= 10:
+                        continue
+                        
+                    try:
+                        with Image.open(file_path) as img:
+                            width, height = img.size
+                            # Format as greatest_dimension x smallest_dimension
+                            if width >= height:
+                                dimensions = f"{width}x{height}"
+                            else:
+                                dimensions = f"{height}x{width}"
+                            dimensions_counter[dimensions] += 1
+                            all_dimensions[dimensions] += 1
+                            images_processed += 1
+                    except Exception:
+                        # Skip files that can't be opened as images
+                        pass
         
         # Calculate average file size
         avg_size = table_size / file_count if file_count > 0 else 0
         
-        # Print table summary
-        print(f"{table:<20} {file_count:<10} {format_size(table_size):<15} {format_size(avg_size):<15}")
+        # Get most common dimensions
+        most_common_dimensions = "N/A"
+        if dimensions_counter:
+            most_common_dimensions = dimensions_counter.most_common(1)[0][0]
+        
+        # Store data for later display
+        formatted_total_size = format_size(table_size)
+        formatted_avg_size = format_size(avg_size)
+        table_data.append({
+            'table': table,
+            'file_count': file_count,
+            'total_size': formatted_total_size,
+            'avg_size': formatted_avg_size,
+            'dimensions': most_common_dimensions
+        })
+        
+        # Update maximum column widths
+        max_table_name_len = max(max_table_name_len, len(table))
+        max_files_len = max(max_files_len, len(str(file_count)))
+        max_total_size_len = max(max_total_size_len, len(formatted_total_size))
+        max_avg_size_len = max(max_avg_size_len, len(formatted_avg_size))
+        max_dimensions_len = max(max_dimensions_len, len(most_common_dimensions))
         
         grand_total_size += table_size
         grand_total_files += file_count
     
-    print("-" * 60)
+    # Add spacing between columns
+    col_spacing = 4
+    total_width = (max_table_name_len + max_files_len + max_total_size_len + 
+                  max_avg_size_len + max_dimensions_len + (col_spacing * 4))
+    
+    # Calculate grand average size
     grand_avg_size = grand_total_size / grand_total_files if grand_total_files > 0 else 0
-    print(f"{'TOTAL':<20} {grand_total_files:<10} {format_size(grand_total_size):<15} {format_size(grand_avg_size):<15}")
+    
+    # Format the grand totals
+    formatted_grand_total_size = format_size(grand_total_size)
+    formatted_grand_avg_size = format_size(grand_avg_size)
+    
+    # Get most common dimensions overall
+    most_common_overall = "N/A"
+    if all_dimensions:
+        most_common_overall = all_dimensions.most_common(1)[0][0]
+    
+    # Update max widths for totals row
+    max_table_name_len = max(max_table_name_len, len("TOTAL"))
+    max_files_len = max(max_files_len, len(str(grand_total_files)))
+    max_total_size_len = max(max_total_size_len, len(formatted_grand_total_size))
+    max_avg_size_len = max(max_avg_size_len, len(formatted_grand_avg_size))
+    max_dimensions_len = max(max_dimensions_len, len(most_common_overall))
+    
+    # Now print the header with adjusted column widths
+    mode_text = " (testing all images)" if test_all else ""
+    print(f"\nAttachment Size Summary{mode_text}:")
+    
+    header = (f"{'Table':<{max_table_name_len}}" + " " * col_spacing +
+              f"{'Files':<{max_files_len}}" + " " * col_spacing +
+              f"{'Total Size':<{max_total_size_len}}" + " " * col_spacing +
+              f"{'Avg Size':<{max_avg_size_len}}" + " " * col_spacing +
+              f"{'Dimensions':<{max_dimensions_len}}")
+    print(header)
+    print("-" * total_width)
+    
+    # Print each row with adjusted column widths
+    for row in table_data:
+        print(f"{row['table']:<{max_table_name_len}}" + " " * col_spacing +
+              f"{row['file_count']:<{max_files_len}}" + " " * col_spacing +
+              f"{row['total_size']:<{max_total_size_len}}" + " " * col_spacing +
+              f"{row['avg_size']:<{max_avg_size_len}}" + " " * col_spacing +
+              f"{row['dimensions']:<{max_dimensions_len}}")
+    
+    # Print the separator and totals row
+    print("-" * total_width)
+    print(f"{'TOTAL':<{max_table_name_len}}" + " " * col_spacing +
+          f"{grand_total_files:<{max_files_len}}" + " " * col_spacing +
+          f"{formatted_grand_total_size:<{max_total_size_len}}" + " " * col_spacing +
+          f"{formatted_grand_avg_size:<{max_avg_size_len}}" + " " * col_spacing +
+          f"{most_common_overall:<{max_dimensions_len}}")
     print()
 
 def get_detailed_sizes():
@@ -301,7 +414,7 @@ def help():
     print("==================================================")
     print("  python resize.py <command> [options]")
     
-    if PIL_AVAILABLE:
+    if pil_available:
         print("\nOptions for resize_images:")
         print(f"  {'--max-dimension':<20} - Maximum width or height in pixels (default: 1024)")
         print(f"  {'--quality':<20} - JPEG quality (0-100, higher is better quality but larger file) (default: 85)")
@@ -338,10 +451,14 @@ def main():
         parser.add_argument('--table', type=str,
                             help='Only process images for the specified table')
     
+    # Arguments for get_sizes
+    parser.add_argument('--testall', action='store_true',
+                        help='Check dimensions of all images (slower but more accurate)')
+    
     args = parser.parse_args()
     
     if args.command == 'get_sizes':
-        get_sizes()
+        get_sizes(test_all=args.testall if hasattr(args, 'testall') else False)
     elif args.command == 'get_detailed_sizes':
         get_detailed_sizes()
     elif args.command == 'resize_images':
