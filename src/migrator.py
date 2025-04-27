@@ -212,7 +212,7 @@ class DatabaseMigrator:
         
         try:
             # Fetch records from source with limit if in test mode
-            limit_clause = f"LIMIT {self.config.max_rows_per_table}" if self.config.test_mode and self.config.max_rows_per_table else ""
+            limit_clause = f""
             cursor.execute(f"SELECT * FROM {table_name} {limit_clause}")
             source_records = cursor.fetchall()
             

@@ -930,35 +930,8 @@ def help():
     print("describe_table_changes        - Describe changes to a table based on column definitions comparison.")
     print("help                          - Display all available helper functions with their descriptions.")
     print("migrate                       - Run the database migration process.")
-    
-    print("\nCommand-line Usage:")
-    print("=" * 50)
-    print("  python helpers.py <command> [options]")
-    
-    print("\nAvailable commands:")
-    print("  pull_database              - Pull the ODK-X database from connected device to data/target.db")
-    print("                               Options: --file=<filename>")
-    print("  push_database              - Push the local database (data/target.db) to connected device")
-    print("  clean_device_db            - Clean up the ODK-X database and temporary files on the device")
-    print("  push_attachments           - Push the attachment folders to connected device")
-    print("  show_form_tables           - Show all form tables in the database")
-    print("  remove_instance_rows       - Remove all rows from form tables in the local target database")
-    print("                               Options: --table=<table_name>")
-    print("  scrub_sync_state           - Reset sync state columns in all form tables")
-    print("  show_forms_with_attachments - Show form tables that have attachment columns")
-    print("  validate_attachments       - Check if all referenced attachments exist")
-    print("                               Options: --table=<table_name>")
-    print("  fix_attachments            - Validate and auto-fix attachment issues")
-    print("                               Options: --table=<table_name>")
-    print("  help                       - Display this help information")
-    print("  execute_sql_source         - Execute SQL query against the source database")
-    print("                               Options: --sql=<sql_query>")
-    print("  execute_sql_target         - Execute SQL query against the target database")
-    print("                               Options: --sql=<sql_query>")
-    print("  migrate                    - Run the database migration process")
-    print("                               Options: --table=<table_name> --verbose")
-    print("  describe_table_changes     - Describe changes to a table based on column definitions comparison")
-    print("                               Options: --table=<table_name>")
+    print("preflight_check               - Check for and remove 0KB files on the connected Android device.")
+    print("describe_table_changes        - Describe changes to a table based on column definitions comparison.")
 
 def execute_sql_source(sql: str, verbose: bool = True):
     """Execute SQL query against the source database.
@@ -1264,6 +1237,91 @@ def migrate(table_name=None, verbose=False):
         root_logger.handlers = original_handlers
         root_logger.setLevel(original_level)
 
+def preflight_check():
+    """Check for and remove 0KB files under /sdcard/opendatakit on the connected device.
+    
+    This function uses ADB to find all 0KB files in the /sdcard/opendatakit directory
+    on the connected Android device and removes them to prevent sync crashes.
+    
+    Returns:
+        int: Number of files removed
+    
+    Raises:
+        subprocess.CalledProcessError: If there's an error executing ADB commands
+    """
+    device_dir = '/sdcard/opendatakit'
+    
+    print(f"Running ODK-X preflight check for 0KB files under {device_dir}...")
+    
+    # First check if a device is connected
+    try:
+        # Check for connected devices
+        device_check = subprocess.run(
+            ['adb', 'devices'],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        
+        # Parse the output to check if any devices are connected
+        lines = device_check.stdout.strip().split('\n')
+        if len(lines) <= 1 or not any('device' in line.lower() for line in lines[1:]):
+            print("ERROR: No Android device connected or device not authorized.")
+            print("Please connect a device and ensure it is authorized for debugging.")
+            print("Preflight check aborted.")
+            sys.exit(1)
+            
+        # Check if we can access the opendatakit directory
+        dir_check = subprocess.run(
+            ['adb', 'shell', f"ls {device_dir}"],
+            check=False,  # Don't raise exception here, we'll handle it manually
+            capture_output=True,
+            text=True
+        )
+        
+        if dir_check.returncode != 0:
+            print(f"ERROR: Cannot access {device_dir} on the device.")
+            print(f"The directory may not exist or you may not have permission to access it.")
+            print("Error details:", dir_check.stderr.strip())
+            print("Preflight check aborted.")
+            sys.exit(1)
+        
+        # Find all 0KB files
+        result = subprocess.run(
+            ['adb', 'shell', f"find {device_dir} -type f -size 0c"],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        
+        zero_files = result.stdout.strip().split('\n')
+        # Filter out empty strings that might occur if no files are found
+        zero_files = [f for f in zero_files if f]
+        
+        if zero_files:
+            print(f"WARNING: Found {len(zero_files)} 0KB files! Removing them to prevent sync crashes...")
+            for file in zero_files:
+                print(f"  {file}")
+            
+            # Delete the 0KB files
+            subprocess.run(
+                ['adb', 'shell', f"find {device_dir} -type f -size 0c -delete"],
+                check=True
+            )
+            print(f"{len(zero_files)} 0KB files deleted.")
+            print("Preflight check complete. You can now sync safely.")
+            return len(zero_files)
+        else:
+            print("No 0KB files found. All good!")
+            print("Preflight check complete. You can now sync safely.")
+            return 0
+            
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: An unexpected error occurred during the preflight check:")
+        print(f"  {e}")
+        print("Preflight check failed. DO NOT proceed with sync until this issue is resolved.")
+        sys.exit(1)
+
 def main():
     if len(sys.argv) < 2:
         help()
@@ -1291,6 +1349,9 @@ def main():
         # For backward compatibility
         clean_device_db()
     
+    elif command == "preflight_check":
+        preflight_check()
+        
     elif command == "push_attachments":
         push_attachments()
     
