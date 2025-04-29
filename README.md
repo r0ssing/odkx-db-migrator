@@ -109,6 +109,30 @@ Run `python resize.py` to see all available functions for attachment management,
 - Get attachment size statistics
 - Resize image attachments to reduce file size
 
+### ODK-X Sync Utilities (sync.py)
+Run `python sync.py` to see all available functions for interacting with the ODK-X sync endpoint. This tool is designed for making minor updates to the app without requiring a full reset of the sync endpoint, such as uploading new CSS or JavaScript files without changes to the data structure.
+
+Available commands include:
+- `setCredentials` - Set server credentials for synchronization
+- `checkAuth` - Verify if the user has sufficient permissions to download data
+- `pushFile` - Upload one or more files to the ODK server
+- `deleteFile` - Delete one or more files from the ODK server
+
+Example usage:
+```bash
+# Set credentials for the ODK-X server
+python sync.py setCredentials --server "https://your-server.org" --username "user" --password "pass"
+
+# Check if authentication is successful
+python sync.py checkAuth
+
+# Upload multiple files to a specific folder
+python sync.py pushFile --path "path/to/file1.css, path/to/file2.js" --remoteFolder "assets/dist/"
+
+# Delete multiple files
+python sync.py deleteFile --path "assets/dist/old-file1.css, assets/dist/old-file2.js"
+```
+
 ## Configuration
 Edit `config/schema_config.py` to define:
 - Source and target table schemas

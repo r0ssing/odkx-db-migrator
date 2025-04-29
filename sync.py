@@ -4,7 +4,9 @@ import re
 import argparse
 import sys
 import requests
+import mimetypes
 from urllib.parse import urljoin
+from pathlib import Path
 
 def setCredentials(serverUrl, username, password):
     """
@@ -67,16 +69,6 @@ def getCredentials():
         credentials = json.load(f)
     
     return credentials
-
-
-def resetAuth():
-    """
-    Reset the authentication for the current session.
-    """
-    # In Python, we don't need to explicitly reset the connection
-    # as each request creates a new connection by default
-    pass
-
 
 def handleResponseStatus(response):
     """
@@ -160,6 +152,221 @@ def getResponse(urlSegment, writeToPath=None):
         raise Exception("Unable to connect to sync endpoint")
 
 
+def constructFileUrl(baseUrl, filePath, version="2"):
+    """
+    Construct the URL for a file on the ODK server.
+    
+    Args:
+        baseUrl (str): The base URL of the ODK server
+        filePath (str): The relative path to the file on the server
+        version (str, optional): The ODK version. Defaults to "2".
+        
+    Returns:
+        str: The complete URL to the file
+    """
+    # Normalize the file path
+    filePath = filePath.replace('\\', '/')
+    if filePath.startswith('/'):
+        filePath = filePath[1:]
+    
+    # Construct the URL
+    return f"{baseUrl}/odktables/default/files/{version}/{filePath}"
+
+
+def determineContentType(filename):
+    """
+    Determine the content type (MIME type) of a file based on its extension.
+    
+    Args:
+        filename (str): The name of the file
+        
+    Returns:
+        str: The content type of the file
+    """
+    content_type, _ = mimetypes.guess_type(filename)
+    if content_type is None:
+        # Default to binary stream if type cannot be determined
+        content_type = 'application/octet-stream'
+    return content_type
+
+
+def pushFile(localFilePaths, remoteFolder):
+    """
+    Upload one or more files to the ODK server.
+    
+    Args:
+        localFilePaths (str): Comma-separated list of paths to local files to upload
+        remoteFolder (str): Relative path on the server where the files will be stored
+        
+    Returns:
+        dict: Dictionary mapping file paths to their HTTP response status codes
+        
+    Raises:
+        FileNotFoundError: If a local file does not exist
+        Exception: If there's an error during the upload process
+    """
+    # Split the comma-separated list of paths
+    paths = [path.strip() for path in localFilePaths.split(',')]
+    results = {}
+    
+    try:
+        # Get credentials
+        creds = getCredentials()
+        baseUrl = creds["server_url"]
+        username = creds["username"]
+        password = creds["password"]
+        
+        # Fixed parameters
+        appId = "default"
+        version = "2"
+        
+        # Normalize remote path
+        remoteFolder = remoteFolder.replace('\\', '/')
+        if not remoteFolder.endswith('/'):
+            remoteFolder += '/'
+            
+        print(f"Preparing to upload {len(paths)} file(s) to {remoteFolder}...")
+        
+        for localFilePath in paths:
+            try:
+                # Normalize file path
+                localFilePath = os.path.abspath(localFilePath)
+                file = Path(localFilePath)
+                
+                # Check if file exists
+                if not file.exists():
+                    print(f"File {localFilePath} does not exist, skipping...")
+                    results[localFilePath] = -1  # Use -1 to indicate an error
+                    continue
+                    
+                # Check file size
+                file_size = os.path.getsize(file)
+                if file_size == 0:
+                    print(f"File {localFilePath} has 0KB size. The API does not support uploading empty files, skipping...")
+                    results[localFilePath] = -2  # Use -2 to indicate a size error
+                    continue
+                
+                # Read file data
+                with open(file, 'rb') as f:
+                    data = f.read()
+                
+                # Construct the URI for file upload
+                filename = os.path.basename(localFilePath)
+                relativePathOnServer = f"{remoteFolder}{filename}"
+                uploadUri = constructFileUrl(baseUrl, relativePathOnServer)
+                
+                print(f"Uploading file to: {uploadUri}")
+                
+                # Determine content type
+                contentType = determineContentType(filename)
+                
+                # Make the POST request
+                response = requests.post(
+                    uploadUri,
+                    data=data,
+                    auth=(username, password),
+                    headers={
+                        "User-Agent": "python-odkx-client",
+                        "Content-Type": contentType
+                    }
+                )
+                
+                # Print response details
+                status_message = f"{response.status_code} (created)" if response.status_code == 201 else f"{response.status_code}"
+                print(f"Upload response status code: {status_message}")
+                
+                if response.text:
+                    print(f"Response content: {response.text}")
+                
+                # Store the result
+                results[localFilePath] = response.status_code
+                
+            except Exception as e:
+                print(f"Failed to upload {localFilePath}: {str(e)}")
+                results[localFilePath] = -3  # Use -3 to indicate a general error
+        
+        # Print summary
+        print("\nUpload Summary:")
+        successful = sum(1 for code in results.values() if code in [200, 201])
+        print(f"Successfully uploaded: {successful}/{len(paths)} files")
+        
+        return results
+        
+    except Exception as e:
+        print(f"Upload process failed: {str(e)}")
+        raise
+
+
+def deleteFile(filePaths):
+    """
+    Delete one or more files from the ODK server.
+    
+    Args:
+        filePaths (str): Comma-separated list of relative paths to files on the server
+        
+    Returns:
+        dict: Dictionary mapping file paths to their HTTP response status codes
+        
+    Raises:
+        Exception: If there's an error during the deletion process
+    """
+    # Split the comma-separated list of paths
+    paths = [path.strip() for path in filePaths.split(',')]
+    results = {}
+    
+    try:
+        # Get credentials
+        creds = getCredentials()
+        baseUrl = creds["server_url"]
+        username = creds["username"]
+        password = creds["password"]
+        
+        print(f"Preparing to delete {len(paths)} file(s)...")
+        
+        for filePath in paths:
+            try:
+                # Construct the URI for file deletion
+                deleteUri = constructFileUrl(baseUrl, filePath)
+                
+                print(f"Deleting file at: {deleteUri}")
+                
+                # Make the DELETE request
+                response = requests.delete(
+                    deleteUri,
+                    auth=(username, password),
+                    headers={
+                        "User-Agent": "python-odkx-client"
+                    }
+                )
+                
+                # Print response details
+                status_message = f"{response.status_code}" 
+                if response.status_code == 204:
+                    status_message += " (no content)"
+                print(f"Delete response status code: {status_message}")
+                
+                if response.text:
+                    print(f"Response content: {response.text}")
+                
+                # Store the result
+                results[filePath] = response.status_code
+                
+            except Exception as e:
+                print(f"Failed to delete {filePath}: {str(e)}")
+                results[filePath] = -1  # Use -1 to indicate an error
+        
+        # Print summary
+        print("\nDeletion Summary:")
+        successful = sum(1 for code in results.values() if code in [200, 204])
+        print(f"Successfully deleted: {successful}/{len(paths)} files")
+        
+        return results
+        
+    except Exception as e:
+        print(f"Deletion process failed: {str(e)}")
+        raise
+
+
 def checkAuth():
     """
     Verify if the user has sufficient permissions to download data.
@@ -168,8 +375,6 @@ def checkAuth():
         bool: True if the user has admin access, False otherwise
     """
     try:
-        # Reset authentication (not strictly necessary in Python)
-        resetAuth()
         
         # Get privileges information
         auth = getResponse("/odktables/default/privilegesInfo")
@@ -200,9 +405,13 @@ def help():
     print("Available commands:")
     print("  setCredentials  - Set server credentials for synchronization")
     print("  checkAuth      - Verify if the user has sufficient permissions to download data")
+    print("  pushFile       - Upload a file to the ODK server")
+    print("  deleteFile     - Delete a file from the ODK server")
     print("\nUsage examples:")
     print("  python sync.py setCredentials --server \"https://example.org\" --username \"user\" --password \"pass\"")
     print("  python sync.py checkAuth")
+    print("  python sync.py pushFile --path \"path/to/file1.html, path/to/file2.css\" --remoteFolder \"assets/dist/\"")
+    print("  python sync.py deleteFile --path \"assets/dist/index.html, assets/dist/style.css\"")
     print("  python sync.py help\n")
 
 
@@ -222,6 +431,15 @@ def main():
     # checkAuth command
     check_auth_parser = subparsers.add_parser("checkAuth", help="Verify if the user has sufficient permissions to download data")
     
+    # pushFile command
+    push_file_parser = subparsers.add_parser("pushFile", help="Upload one or more files to the ODK server")
+    push_file_parser.add_argument("--path", required=True, help="Comma-separated list of paths to local files to upload")
+    push_file_parser.add_argument("--remoteFolder", required=True, help="Relative path on the server where the files will be stored")
+    
+    # deleteFile command
+    delete_file_parser = subparsers.add_parser("deleteFile", help="Delete a file from the ODK server")
+    delete_file_parser.add_argument("--path", required=True, help="Relative path to the file on the server")
+    
     # help command
     help_parser = subparsers.add_parser("help", help="Show help information")
     
@@ -237,6 +455,20 @@ def main():
             print("Authentication successful! User has admin access.")
         else:
             print("Authentication failed or insufficient permissions.")
+    elif args.command == "pushFile":
+        try:
+            results = pushFile(args.path, args.remoteFolder)
+            # Summary is already printed by the pushFile function
+        except Exception as e:
+            print(f"Error: {str(e)}")
+            sys.exit(1)
+    elif args.command == "deleteFile":
+        try:
+            results = deleteFile(args.path)
+            # Summary is already printed by the deleteFile function
+        except Exception as e:
+            print(f"Error: {str(e)}")
+            sys.exit(1)
     elif args.command == "help" or args.command is None:
         help()
     else:
