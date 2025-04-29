@@ -42,6 +42,7 @@ ENV/
 *.log
 migration_report.md
 data/
+.sync_credentials
 
 # Test coverage
 .coverage
