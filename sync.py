@@ -367,6 +367,82 @@ def deleteFile(filePaths):
         raise
 
 
+def listAppFiles(version="2"):
+    """
+    Retrieve and display the list of app files from the ODK-X server.
+    
+    Args:
+        version (str, optional): The ODK version. Defaults to "2".
+        
+    Returns:
+        dict: The manifest of app files or None if the request fails
+    """
+    try:
+        # Get credentials
+        creds = getCredentials()
+        baseUrl = creds["server_url"]
+        
+        # Construct the URL for the manifest
+        manifestUrl = f"{baseUrl}/odktables/default/manifest/{version}/"
+        
+        print(f"Retrieving app files manifest from: {manifestUrl}")
+        
+        try:
+            # Get the manifest
+            manifest = getResponse(manifestUrl)
+            
+            # Process and display the manifest
+            if manifest and isinstance(manifest, dict) and "files" in manifest and isinstance(manifest["files"], list):
+                files = manifest["files"]
+                file_count = len(files)
+                
+                # Sort files alphabetically by filename
+                sorted_files = sorted(files, key=lambda x: x.get("filename", ""))
+                
+                # Calculate column widths for better formatting
+                filename_width = max(len(file.get("filename", "")) for file in sorted_files) + 2
+                size_width = 12  # Enough for formatted file sizes
+                
+                # Print header
+                print("\nFile List (sorted alphabetically):")
+                print(f"{'File Path':{filename_width}} {'Size':{size_width}} {'Download URL'}")
+                print("-" * (filename_width + size_width + 50))
+                
+                # Print each file
+                for file in sorted_files:
+                    filename = file.get("filename", "")
+                    content_length = file.get("contentLength", 0)
+                    download_url = file.get("downloadUrl", "")
+                    
+                    # Format the size (convert bytes to KB, MB, etc.)
+                    if content_length < 1024:
+                        size_str = f"{content_length} B"
+                    elif content_length < 1024 * 1024:
+                        size_str = f"{content_length/1024:.1f} KB"
+                    else:
+                        size_str = f"{content_length/(1024*1024):.1f} MB"
+                    
+                    print(f"{filename:{filename_width}} {size_str:{size_width}} {download_url}")
+                
+                print(f"\nTotal files: {file_count}")
+                
+                # Also return the full manifest for programmatic use
+                return manifest
+            else:
+                print("No manifest data received or invalid format.")
+                return None
+                
+        except Exception as e:
+            print(f"Error accessing manifest: {str(e)}")
+            print("\nAlternative approach: You can try accessing the files directly using the pushFile and deleteFile commands")
+            print("if you know the specific file paths on the server.")
+            return None
+        
+    except Exception as e:
+        print(f"Failed to retrieve app files manifest: {str(e)}")
+        return None
+
+
 def checkAuth():
     """
     Verify if the user has sufficient permissions to download data.
@@ -405,11 +481,13 @@ def help():
     print("Available commands:")
     print("  setCredentials  - Set server credentials for synchronization")
     print("  checkAuth      - Verify if the user has sufficient permissions to download data")
+    print("  listAppFiles   - Retrieve and display the list of app files from the ODK-X server")
     print("  pushFile       - Upload a file to the ODK server")
     print("  deleteFile     - Delete a file from the ODK server")
     print("\nUsage examples:")
     print("  python sync.py setCredentials --server \"https://example.org\" --username \"user\" --password \"pass\"")
     print("  python sync.py checkAuth")
+    print("  python sync.py listAppFiles")
     print("  python sync.py pushFile --path \"path/to/file1.html, path/to/file2.css\" --remoteFolder \"assets/dist/\"")
     print("  python sync.py deleteFile --path \"assets/dist/index.html, assets/dist/style.css\"")
     print("  python sync.py help\n")
@@ -430,6 +508,9 @@ def main():
     
     # checkAuth command
     check_auth_parser = subparsers.add_parser("checkAuth", help="Verify if the user has sufficient permissions to download data")
+    
+    # listAppFiles command
+    list_files_parser = subparsers.add_parser("listAppFiles", help="Retrieve and display the list of app files from the ODK-X server")
     
     # pushFile command
     push_file_parser = subparsers.add_parser("pushFile", help="Upload one or more files to the ODK server")
@@ -455,6 +536,12 @@ def main():
             print("Authentication successful! User has admin access.")
         else:
             print("Authentication failed or insufficient permissions.")
+    elif args.command == "listAppFiles":
+        try:
+            listAppFiles()
+        except Exception as e:
+            print(f"Error: {str(e)}")
+            sys.exit(1)
     elif args.command == "pushFile":
         try:
             results = pushFile(args.path, args.remoteFolder)
