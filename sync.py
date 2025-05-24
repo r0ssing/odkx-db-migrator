@@ -366,67 +366,114 @@ def deleteFile(filePaths):
         print(f"Deletion process failed: {str(e)}")
         raise
 
+def listServerTables():
+    tables = getServerTables()
+    for table in tables:
+        print(table)
 
-def listAppFiles(version="2"):
+def getServerTables():
+    """
+    Retrieve and display the list of tables from the ODK-X server.
+    
+    Args:
+        version (str, optional): The ODK version. Defaults to "2".
+
+    Returns:
+        list: The list of table names or None if the request fails
+    """
+    creds = getCredentials()
+    baseUrl = creds["server_url"]
+    tableResponse = getResponse(f"{baseUrl}/odktables/default/tables/")
+    tables = tableResponse["tables"]
+    table_ids = [table["tableId"] for table in tables]
+    return table_ids
+
+def listTableFiles(version="2", tableName=""):
     """
     Retrieve and display the list of app files from the ODK-X server.
     
     Args:
         version (str, optional): The ODK version. Defaults to "2".
+        tableName (str, optional): The name of the table to retrieve. 
+                                 If not specified, the files are retrieved for all tables.
+
+    Returns:
+        dict: The manifest of app files or None if the request fails
+    """
+    creds = getCredentials()
+    baseUrl = creds["server_url"]
+    
+    if not tableName:
+        # Get all tables and their files
+        tables = getServerTables()
+        if not tables:
+            print("No tables found.")
+            return None
+            
+        all_files = []
+        table_files = {}
         
+        # First collect all files
+        for table in tables:
+            manifest = getFiles(version=version, 
+                             manifestUrl=f"{baseUrl}/odktables/default/manifest/{version}/{table}")
+            if manifest and "files" in manifest and manifest["files"]:
+                # Add table name to each file for reference
+                for file_info in manifest["files"]:
+                    file_info["table"] = table
+                all_files.extend(manifest["files"])
+                table_files[table] = manifest
+        
+        if not all_files:
+            print("No files found in any table.")
+            return None
+            
+        # Print all files together with table information
+        print("\n=== All Files ===")
+        printFiles(all_files)
+        
+        return table_files
+    else:
+        # Single table case
+        manifest = getFiles(version=version, 
+                         manifestUrl=f"{baseUrl}/odktables/default/manifest/{version}/{tableName}")
+        if manifest:
+            listFiles(version=version, manifestUrl=f"{baseUrl}/odktables/default/manifest/{version}/{tableName}")
+        return manifest
+
+
+def listAppFiles(version="2"):
+    # Get credentials
+    creds = getCredentials()
+    baseUrl = creds["server_url"]
+    manifest = listFiles(version="2", manifestUrl=f"{baseUrl}/odktables/default/manifest/{version}/")
+    return manifest
+
+def getFiles(version="2", manifestUrl=""):
+    """
+    Retrieve the list of app files from the ODK-X server.
+    
+    Args:
+        version (str, optional): The ODK version. Defaults to "2".
+        manifestUrl (str, optional): The URL of the manifest to retrieve. 
+                                  If not specified, all app files are retrieved.
+
     Returns:
         dict: The manifest of app files or None if the request fails
     """
     try:
         # Get credentials
         creds = getCredentials()
-        baseUrl = creds["server_url"]
-        
-        # Construct the URL for the manifest
-        manifestUrl = f"{baseUrl}/odktables/default/manifest/{version}/"
-        
-        print(f"Retrieving app files manifest from: {manifestUrl}")
+        if not manifestUrl:
+            baseUrl = creds["server_url"]
+            manifestUrl = f"{baseUrl}/odktables/default/manifest/{version}/"
         
         try:
             # Get the manifest
             manifest = getResponse(manifestUrl)
             
-            # Process and display the manifest
+            # Process the manifest
             if manifest and isinstance(manifest, dict) and "files" in manifest and isinstance(manifest["files"], list):
-                files = manifest["files"]
-                file_count = len(files)
-                
-                # Sort files alphabetically by filename
-                sorted_files = sorted(files, key=lambda x: x.get("filename", ""))
-                
-                # Calculate column widths for better formatting
-                filename_width = max(len(file.get("filename", "")) for file in sorted_files) + 2
-                size_width = 12  # Enough for formatted file sizes
-                
-                # Print header
-                print("\nFile List (sorted alphabetically):")
-                print(f"{'File Path':{filename_width}} {'Size':{size_width}} {'Download URL'}")
-                print("-" * (filename_width + size_width + 50))
-                
-                # Print each file
-                for file in sorted_files:
-                    filename = file.get("filename", "")
-                    content_length = file.get("contentLength", 0)
-                    download_url = file.get("downloadUrl", "")
-                    
-                    # Format the size (convert bytes to KB, MB, etc.)
-                    if content_length < 1024:
-                        size_str = f"{content_length} B"
-                    elif content_length < 1024 * 1024:
-                        size_str = f"{content_length/1024:.1f} KB"
-                    else:
-                        size_str = f"{content_length/(1024*1024):.1f} MB"
-                    
-                    print(f"{filename:{filename_width}} {size_str:{size_width}} {download_url}")
-                
-                print(f"\nTotal files: {file_count}")
-                
-                # Also return the full manifest for programmatic use
                 return manifest
             else:
                 print("No manifest data received or invalid format.")
@@ -441,6 +488,69 @@ def listAppFiles(version="2"):
     except Exception as e:
         print(f"Failed to retrieve app files manifest: {str(e)}")
         return None
+
+def printFiles(files, title=None):
+    """
+    Print a formatted list of files.
+    
+    Args:
+        files (list): List of file dictionaries
+        title (str, optional): Optional title to display above the file list
+    """
+    if not files or not isinstance(files, list):
+        print("No files to display.")
+        return
+    
+    # Sort files alphabetically by filename
+    sorted_files = sorted(files, key=lambda x: x.get("filename", ""))
+    
+    # Calculate column widths for better formatting
+    filename_width = max(len(file.get("filename", "")) for file in sorted_files) + 2
+    size_width = 12  # Enough for formatted file sizes
+    
+    # Print header
+    if title:
+        print(f"\n{title}")
+    print("File List (sorted alphabetically):")
+    print(f"{'File Path':{filename_width}} {'Size':{size_width}} {'Download URL'}")
+    print("-" * (filename_width + size_width + 50))
+    
+    # Print each file
+    for file in sorted_files:
+        filename = file.get("filename", "")
+        content_length = file.get("contentLength", 0)
+        download_url = file.get("downloadUrl", "")
+        
+        # Format the size (convert bytes to KB, MB, etc.)
+        if content_length < 1024:
+            size_str = f"{content_length} B"
+        elif content_length < 1024 * 1024:
+            size_str = f"{content_length/1024:.1f} KB"
+        else:
+            size_str = f"{content_length/(1024*1024):.1f} MB"
+        
+        print(f"{filename:{filename_width}} {size_str:{size_width}} {download_url}")
+    
+    print(f"\nTotal files: {len(files)}")
+
+def listFiles(version="2", manifestUrl=""):
+    """
+    Retrieve and display the list of app files from the ODK-X server.
+    
+    Args:
+        version (str, optional): The ODK version. Defaults to "2".
+        manifestUrl (str, optional): The URL of the manifest to display.
+                                  If not specified, all app files are retrieved.
+
+    Returns:
+        dict: The manifest of app files or None if the request fails
+    """
+    manifest = getFiles(version, manifestUrl)
+    
+    if manifest and "files" in manifest and isinstance(manifest["files"], list):
+        printFiles(manifest["files"])
+        return manifest
+    return None
 
 
 def checkAuth():
@@ -482,12 +592,16 @@ def help():
     print("  setCredentials  - Set server credentials for synchronization")
     print("  checkAuth      - Verify if the user has sufficient permissions to download data")
     print("  listAppFiles   - Retrieve and display the list of app files from the ODK-X server")
+    print("  listServerTables - Retrieve and display the list of tables from the ODK-X server")
+    print("  listTableFiles - Retrieve and display the list of table files from the ODK-X server")
     print("  pushFile       - Upload a file to the ODK server")
     print("  deleteFile     - Delete a file from the ODK server")
     print("\nUsage examples:")
     print("  python sync.py setCredentials --server \"https://example.org\" --username \"user\" --password \"pass\"")
     print("  python sync.py checkAuth")
     print("  python sync.py listAppFiles")
+    print("  python sync.py listServerTables")
+    print("  python sync.py listTableFiles [--tableName tableId]")
     print("  python sync.py pushFile --path \"path/to/file1.html, path/to/file2.css\" --remoteFolder \"assets/dist/\"")
     print("  python sync.py deleteFile --path \"assets/dist/index.html, assets/dist/style.css\"")
     print("  python sync.py help\n")
@@ -510,7 +624,14 @@ def main():
     check_auth_parser = subparsers.add_parser("checkAuth", help="Verify if the user has sufficient permissions to download data")
     
     # listAppFiles command
-    list_files_parser = subparsers.add_parser("listAppFiles", help="Retrieve and display the list of app files from the ODK-X server")
+    list_app_files_parser = subparsers.add_parser("listAppFiles", help="Retrieve and display the list of app files from the ODK-X server")
+    
+    # listServerTables command
+    list_server_tables_parser = subparsers.add_parser("listServerTables", help="Retrieve and display the list of tables from the ODK-X server")
+    
+    # listTableFiles command
+    list_table_files_parser = subparsers.add_parser("listTableFiles", help="Retrieve and display the list of table files from the ODK-X server")
+    list_table_files_parser.add_argument("--tableName", required=False, help="Name of the table to retrieve files for")
     
     # pushFile command
     push_file_parser = subparsers.add_parser("pushFile", help="Upload one or more files to the ODK server")
@@ -539,6 +660,18 @@ def main():
     elif args.command == "listAppFiles":
         try:
             listAppFiles()
+        except Exception as e:
+            print(f"Error: {str(e)}")
+            sys.exit(1)
+    elif args.command == "listTableFiles":
+        try:
+            listTableFiles(tableName=args.tableName)
+        except Exception as e:
+            print(f"Error: {str(e)}")
+            sys.exit(1)
+    elif args.command == "listServerTables":
+        try:
+            listServerTables()
         except Exception as e:
             print(f"Error: {str(e)}")
             sys.exit(1)
