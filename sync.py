@@ -409,7 +409,8 @@ def listTableFiles(version="2", tableName=""):
         if not tables:
             print("No tables found.")
             return None
-            
+
+
         all_files = []
         table_files = {}
         
@@ -553,6 +554,65 @@ def listFiles(version="2", manifestUrl=""):
     return None
 
 
+def updateCoreAppFiles(distFolder):
+    dist_path = Path(distFolder)
+    if not dist_path.exists() or not dist_path.is_dir():
+        raise FileNotFoundError(f"distFolder does not exist or is not a directory: {dist_path}")
+
+    index_html = dist_path / "index.html"
+    if not index_html.exists() or not index_html.is_file():
+        raise FileNotFoundError(f"Missing required file: {index_html}")
+
+    asset_dir = dist_path / "asset"
+    assets_dir = dist_path / "assets"
+    if asset_dir.exists() and asset_dir.is_dir():
+        chosen_assets_dir = asset_dir
+    elif assets_dir.exists() and assets_dir.is_dir():
+        chosen_assets_dir = assets_dir
+    else:
+        raise FileNotFoundError(f"Missing required directory: {asset_dir} (or {assets_dir})")
+
+    js_files = sorted(chosen_assets_dir.glob("index-*.js"))
+    js_map_files = sorted(chosen_assets_dir.glob("index-*.js.map"))
+    css_files = sorted(chosen_assets_dir.glob("index-*.css"))
+
+    if len(js_files) != 1:
+        raise FileNotFoundError(f"Expected exactly 1 index-*.js in {chosen_assets_dir}, found {len(js_files)}")
+    if len(js_map_files) != 1:
+        raise FileNotFoundError(f"Expected exactly 1 index-*.js.map in {chosen_assets_dir}, found {len(js_map_files)}")
+    if len(css_files) != 1:
+        raise FileNotFoundError(f"Expected exactly 1 index-*.css in {chosen_assets_dir}, found {len(css_files)}")
+
+    local_js = js_files[0]
+    local_js_map = js_map_files[0]
+    local_css = css_files[0]
+
+    manifest = getFiles(version="2")
+    remote_delete_paths = ["assets/dist/index.html"]
+    if manifest and isinstance(manifest, dict) and isinstance(manifest.get("files"), list):
+        pattern = re.compile(r"^assets/dist/assets/index-.*\.(css|js|js\.map)$")
+        for file_info in manifest["files"]:
+            filename = file_info.get("filename", "")
+            if pattern.match(filename):
+                remote_delete_paths.append(filename)
+    else:
+        print("Warning: could not retrieve app files manifest; will only delete assets/dist/index.html")
+
+    unique_remote_delete_paths = []
+    seen = set()
+    for p in remote_delete_paths:
+        if p not in seen:
+            unique_remote_delete_paths.append(p)
+            seen.add(p)
+
+    print("Deleting existing core app dist files from server...")
+    deleteFile(", ".join(unique_remote_delete_paths))
+
+    print("Uploading new core app dist files to server...")
+    pushFile(str(index_html), "assets/dist/")
+    pushFile(", ".join([str(local_css), str(local_js), str(local_js_map)]), "assets/dist/assets/")
+
+
 def checkAuth():
     """
     Verify if the user has sufficient permissions to download data.
@@ -596,6 +656,7 @@ def help():
     print("  listTableFiles - Retrieve and display the list of table files from the ODK-X server")
     print("  pushFile       - Upload a file to the ODK server")
     print("  deleteFile     - Delete a file from the ODK server")
+    print("  updateCoreAppFiles - Removes dist/index.html and associated js/css files, then uploads the new html/js/css files from the local dist folder")
     print("\nUsage examples:")
     print("  python sync.py setCredentials --server \"https://example.org\" --username \"user\" --password \"pass\"")
     print("  python sync.py checkAuth")
@@ -604,6 +665,7 @@ def help():
     print("  python sync.py listTableFiles [--tableName tableId]")
     print("  python sync.py pushFile --path \"path/to/file1.html, path/to/file2.css\" --remoteFolder \"assets/dist/\"")
     print("  python sync.py deleteFile --path \"assets/dist/index.html, assets/dist/style.css\"")
+    print("  python sync.py updateCoreAppFiles --distFolder \"./app-designer/dist/\"")
     print("  python sync.py help\n")
 
 
@@ -641,6 +703,13 @@ def main():
     # deleteFile command
     delete_file_parser = subparsers.add_parser("deleteFile", help="Delete a file from the ODK server")
     delete_file_parser.add_argument("--path", required=True, help="Relative path to the file on the server")
+
+    # updateCoreAppFiles command
+    update_core_app_files_parser = subparsers.add_parser(
+        "updateCoreAppFiles",
+        help="Removes dist/index.html and associated js/css files, then uploads the new html/js/css files from the local dist folder"
+    )
+    update_core_app_files_parser.add_argument("--distFolder", required=True, help="Path to local dist folder containing index.html and assets/")
     
     # help command
     help_parser = subparsers.add_parser("help", help="Show help information")
@@ -686,6 +755,12 @@ def main():
         try:
             results = deleteFile(args.path)
             # Summary is already printed by the deleteFile function
+        except Exception as e:
+            print(f"Error: {str(e)}")
+            sys.exit(1)
+    elif args.command == "updateCoreAppFiles":
+        try:
+            updateCoreAppFiles(args.distFolder)
         except Exception as e:
             print(f"Error: {str(e)}")
             sys.exit(1)
